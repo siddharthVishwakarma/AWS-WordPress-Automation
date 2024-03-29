@@ -1,0 +1,96 @@
+---
+- name: Provision EC2 instances for WordPress
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  tasks:
+    - name: Launch EC2 instances for WordPress
+      ec2_instance:
+        key_name: "your-key-pair"
+        instance_type: "t2.micro"
+        image: "ami-xxxxxxxx"  # WordPress AMI ID
+        wait: true
+        assign_public_ip: yes
+        region: "your-region"
+        group: "default"
+        count: 2  # Adjust as needed
+        vpc_subnet_id: "your-subnet-id"
+        tags:
+          Name: "wordpress-instance"
+      register: ec2_instances
+
+- name: Add WordPress instances to host group
+  add_host:
+    hostname: "{{ item.public_ip }}"
+    groupname: wordpress_hosts
+  with_items: "{{ ec2_instances.instances }}"
+
+- name: Install WordPress and configure database
+  hosts: wordpress_hosts
+  become: true
+  tasks:
+    - name: Update package cache and install PHP dependencies
+      yum:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - php
+        - php-mysql
+        - httpd
+        - mysql
+
+    - name: Download and extract WordPress
+      get_url:
+        url: "https://wordpress.org/latest.tar.gz"
+        dest: "/tmp/wordpress.tar.gz"
+      become: yes
+
+    - name: Extract WordPress
+      unarchive:
+        src: "/tmp/wordpress.tar.gz"
+        dest: "/var/www/html/"
+        remote_src: yes
+      become: yes
+
+    - name: Set ownership and permissions for WordPress files
+      file:
+        path: "/var/www/html/"
+        owner: apache
+        group: apache
+        recurse: yes
+      become: yes
+
+    - name: Configure WordPress wp-config.php
+      template:
+        src: templates/wp-config.php.j2
+        dest: "/var/www/html/wp-config.php"
+      become: yes
+
+- name: Provision RDS database for WordPress
+  hosts: localhost
+  connection: local
+  tasks:
+    - name: Create RDS MySQL database instance
+      rds:
+        command: create
+        region: "your-region"
+        instance_name: "wordpress-db"
+        db_instance_class: "db.t2.micro"
+        engine: "mysql"
+        master_username: "admin"
+        master_password: "your-db-password"
+        allocated_storage: 20
+        publicly_accessible: no
+        tags:
+          Name: "wordpress-rds"
+      register: rds_instance
+
+- name: Update WordPress wp-config.php with RDS endpoint
+  hosts: wordpress_hosts
+  become: true
+  tasks:
+    - name: Update WordPress wp-config.php with RDS endpoint
+      lineinfile:
+        path: "/var/www/html/wp-config.php"
+        regexp: "(DB_HOST',\s*')localhost"
+        line: "define('DB_HOST', '{{ rds_instance.instance.endpoint }}');"
